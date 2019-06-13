@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package message;
 
-message ChannelMessage {
+message SubMessage {
     repeated int32 ids = 1;
     repeated int32 subs = 2;
 }

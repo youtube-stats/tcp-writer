@@ -3,7 +3,7 @@ extern crate postgres;
 extern crate quick_protobuf;
 
 pub mod message;
-use message::ChannelMessage;
+use message::SubMessage;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, TcpListener};
 use std::io::Read;
@@ -66,7 +66,7 @@ pub fn write_rows(store: &Vec<ChannelRow>) {
         .expect("Could not commit transaction");
 }
 
-pub fn msg_to_vec(msg: ChannelMessage) -> Vec<ChannelRow> {
+pub fn msg_to_vec(msg: SubMessage) -> Vec<ChannelRow> {
     let mut store: Vec<ChannelRow> = Vec::new();
 
     let time: DateTime<Local> = Local::now();
@@ -89,7 +89,7 @@ pub fn msg_to_vec(msg: ChannelMessage) -> Vec<ChannelRow> {
 fn main() {
     println!("Starting write service");
     let listener: TcpListener = listen();
-    let (sx, rx): (Sender<ChannelMessage>, Receiver<ChannelMessage>) = channel();
+    let (sx, rx): (Sender<SubMessage>, Receiver<SubMessage>) = channel();
 
     spawn(move || {
         let mut store: Vec<ChannelRow> = Vec::new();
@@ -140,7 +140,7 @@ fn main() {
             continue;
         }
 
-        let t: ChannelMessage = msg_option.unwrap();
+        let t: SubMessage = msg_option.unwrap();
         println!("Meesage was {:?}", t);
 
         sx.send(t).expect("Could not send message")
