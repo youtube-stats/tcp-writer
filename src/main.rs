@@ -1,37 +1,32 @@
-extern crate byteorder;
+extern crate chrono;
 extern crate postgres;
 extern crate quick_protobuf;
-extern crate rand;
 
 pub mod message;
 use message::ChannelMessage;
 
-use crate::byteorder::ReadBytesExt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, TcpListener};
-use std::io::Write;
+use std::io::Read;
 use postgres::{Connection, TlsMode};
-use postgres::rows::Rows;
 use std::process::exit;
 use std::thread::spawn;
-use byteorder::LittleEndian;
-use rand::rngs::ThreadRng;
-use rand::thread_rng;
-use rand::seq::SliceRandom;
-use std::borrow::Cow;
-use quick_protobuf::serialize_into_vec;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use quick_protobuf::deserialize_from_slice;
+use chrono::{DateTime, Local};
+use postgres::transaction::Transaction;
+use std::sync::mpsc::{Sender, Receiver, channel};
 
 #[derive(Clone, Debug)]
 pub struct ChannelRow {
+    pub time: DateTime<Local>,
     pub id: i32,
-    pub serial: String
+    pub sub: i32
 }
 
-static PORT: u16 = 3334u16;
-static SLEEP: u64 = 7200u64;
+static PORT: u16 = 3335u16;
+static SIZE: usize = 1000;
+const BUFSIZE: usize = 2000;
 static POSTGRESQL_URL: &'static str = "postgresql://admin@localhost:5432/youtube";
-static QUERY: &'static str = "SELECT id, serial FROM youtube.stats.channels";
+static INSERT: &'static str = "INSERT INTO youtube.stats.channels (time, id, serial) VALUE ($1, $2, $3);";
 
 pub fn listen() -> TcpListener {
     let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
@@ -43,9 +38,8 @@ pub fn listen() -> TcpListener {
         .expect("unable to bind TCP listener")
 }
 
-pub fn get_rows() -> Vec<ChannelRow> {
-    println!("Getting channels");
-
+pub fn write_rows(store: &Vec<ChannelRow>) {
+    println!("Writing {} channels", SIZE);
     let conn: Connection = {
         let params: &'static str = POSTGRESQL_URL;
         let tls: TlsMode = TlsMode::None;
@@ -53,109 +47,101 @@ pub fn get_rows() -> Vec<ChannelRow> {
         Connection::connect(params, tls)
             .expect("Could not connect to database")
     };
-    let query: &'static str = QUERY;
 
-    let results: Rows = conn.query(query, &[])
-        .expect("Could not query db");
+    let query: &'static str = INSERT;
+    let trans: Transaction = conn.transaction()
+        .expect("Could not create transaction");
 
-    let mut rows: Vec<ChannelRow> = Vec::new();
-    for row in &results {
-        let id: i32 = row.get(0);
-        let serial: String = row.get(1);
+    for i in 0..SIZE {
+        let row: &ChannelRow = &store[i];
+        let time: &DateTime<Local> = &row.time;
+        let id: &i32 = &row.id;
+        let sub: &i32 = &row.sub;
 
-        let value: ChannelRow = ChannelRow {
+        conn.execute(query, &[time, id, sub])
+            .expect("Could not query db");
+    }
+
+    trans.commit()
+        .expect("Could not commit transaction");
+}
+
+pub fn msg_to_vec(msg: ChannelMessage) -> Vec<ChannelRow> {
+    let mut store: Vec<ChannelRow> = Vec::new();
+
+    let time: DateTime<Local> = Local::now();
+    for i in 0..msg.subs.len() {
+        let id: i32 = msg.ids[i];
+        let sub: i32 = msg.subs[i];
+
+        let row: ChannelRow = ChannelRow {
+            time,
             id,
-            serial
+            sub
         };
-
-        rows.push(value);
     }
 
-    println!("Retrieved {} rows", rows.len());
-    rows
-}
-
-fn get_50(channels: &Vec<ChannelRow>, length: usize) -> Vec<ChannelRow> {
-    let mut rng: ThreadRng = thread_rng();
-    let amount: usize = 50;
-    let length: usize = if length >= channels.len() {
-        channels.len() - 1
-    } else {
-        length
-    };
-
-    let collect: &[ChannelRow] = &channels[..length];
-    let collect: Vec<ChannelRow> = collect.to_vec();
-
-    collect.choose_multiple(&mut rng, amount).cloned().collect()
-}
-
-pub fn get_msg(channels: &Vec<ChannelRow>, length: usize) -> Vec<u8> {
-    let sampled: Vec<ChannelRow> = get_50(channels, length);
-
-    let mut message: ChannelMessage = ChannelMessage::default();
-
-    for i in 0..50 {
-        let row: &ChannelRow = &sampled[i];
-
-        let value: i32 = row.id;
-        message.ids.push(value);
-
-        let value = &row.serial;
-        let value: Cow<str> = Cow::from(value);
-
-        message.serials.push(value);
-    }
-
-    println!("Sending channel message {:?}", message);
-    serialize_into_vec(&message)
-        .expect("Could not serialize")
+    store
 }
 
 fn main() {
-    println!("Starting cache service");
-
+    println!("Starting write service");
     let listener: TcpListener = listen();
-    let channels1: Arc<Mutex<Vec<ChannelRow>>> = Arc::new(Mutex::new(get_rows()));
-    let channels2: Arc<Mutex<Vec<ChannelRow>>> = Arc::clone(&channels1);
+    let (sx, rx): (Sender<ChannelMessage>, Receiver<ChannelMessage>) = channel();
 
     spawn(move || {
-        let dur: Duration = std::time::Duration::from_secs(SLEEP);
+        let mut store: Vec<ChannelRow> = Vec::new();
 
         loop {
-            println!("Will update channels in {} seconds", SLEEP);
-            std::thread::sleep(dur);
-            println!("Updating channels");
+            {
+                println!("Waiting for messages");
+                let msg = rx.recv()
+                    .expect("Could not receive messsage");
 
-            let channels = get_rows();
-            *channels1.lock().unwrap() = channels;
+                println!("Received message {:?}", msg);
+                let mut other: Vec<ChannelRow> = msg_to_vec(msg);
+                store.append(&mut other);
+            }
+
+            println!("New cache size after insertion {}", store.len());
+            if store.len() >= SIZE {
+                println!("Write triggered");
+
+                write_rows(&store);
+                store.drain(0..SIZE);
+                println!("New cache size after write {}", store.len());
+            }
         }
     });
 
+    let mut buf: [u8; BUFSIZE] = [0u8; BUFSIZE];
     for stream in listener.incoming() {
-        let channels: Arc<Mutex<Vec<ChannelRow>>> = Arc::clone(&channels2);
+        if stream.is_err() {
+            eprintln!("Connection is bad: {:?}", stream);
+            exit(3);
+        }
 
-        spawn(move || {
-            if stream.is_err() {
-                eprintln!("Connection is bad: {:?}", stream);
-                exit(3);
-            }
+        let mut stream: TcpStream = stream.unwrap();
+        let n_option = stream.read(&mut buf);
+        if n_option.is_err() {
+            eprintln!("Could not read from socket");
+            continue;
+        }
 
-            let mut stream: TcpStream = stream.unwrap();
-            let n_option= stream.read_u32::<LittleEndian>();
-            if n_option.is_err() {
-                eprintln!("Could not read u32 from socket");
-                return;
-            }
+        let n: usize = n_option.unwrap();
+        println!("Got {} bytes", n);
+        let length: usize = n as usize;
+        let bytes: &[u8] = buf[..n_option];
 
-            let n: u32 = n_option.unwrap();
-            println!("Got {}", n);
-            let length: usize = n as usize;
-            let channels: &Vec<ChannelRow> = &channels.lock().unwrap();
+        let msg_option = deserialize_from_slice(bytes);
+        if msg_option.is_err() {
+            eprintln!("Could not parse protobuf message");
+            continue;
+        }
 
-            let buf: Vec<u8> = get_msg(channels, length);
-            let mut buf: &[u8] = buf.as_slice();
-            stream.write_all(&mut buf).unwrap();
-        });
+        let t: ChannelMessage = msg_option.unwrap();
+        println!("Meesage was {:?}", t);
+
+        sx.send(t).expect("Could not send message")
     }
 }
