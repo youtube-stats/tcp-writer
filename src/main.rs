@@ -130,8 +130,7 @@ fn main() {
 
         let n: usize = n_option.unwrap();
         println!("Got {} bytes", n);
-        let length: usize = n as usize;
-        let bytes: &[u8] = buf[..n_option];
+        let bytes: &[u8] = &buf[0..n];
 
         let msg_option = deserialize_from_slice(bytes);
         if msg_option.is_err() {
