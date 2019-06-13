@@ -1,2 +1,2 @@
-# cache
-A channel cache
+# write
+A rust channel writer
