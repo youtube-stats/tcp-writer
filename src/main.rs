@@ -74,11 +74,13 @@ pub fn msg_to_vec(msg: ChannelMessage) -> Vec<ChannelRow> {
         let id: i32 = msg.ids[i];
         let sub: i32 = msg.subs[i];
 
-        let row: ChannelRow = ChannelRow {
+        let value: ChannelRow = ChannelRow {
             time,
             id,
             sub
         };
+
+        store.push(value);
     }
 
     store
