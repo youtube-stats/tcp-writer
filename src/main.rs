@@ -26,7 +26,7 @@ static PORT: u16 = 3335u16;
 static SIZE: usize = 1000;
 const BUFSIZE: usize = 2000;
 static POSTGRESQL_URL: &'static str = "postgresql://admin@localhost:5432/youtube";
-static INSERT: &'static str = "INSERT INTO youtube.stats.channels (time, id, serial) VALUE ($1, $2, $3);";
+static INSERT: &'static str = "INSERT INTO youtube.stats.subs (time, id, subs) VALUES ($1, $2, $3);";
 
 pub fn listen() -> TcpListener {
     let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
